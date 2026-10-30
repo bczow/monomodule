@@ -1,0 +1,78 @@
+name: Build Monomodule for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out latest source
+        uses: actions/checkout@v4
+
+      - name: Configure x64 Release build
+        run: >
+          cmake -S . -B build
+          -G "Visual Studio 17 2022"
+          -A x64
+          -DMNM_BUILD_PLUGIN=ON
+          -DMNM_BUILD_TESTS=OFF
+
+      - name: Compile plugins and Library app
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Package VST3 plugins and Library app
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE "Monomodule-Windows-x64"
+          $pluginStage = Join-Path $stage "VST3"
+          New-Item -ItemType Directory -Force -Path $pluginStage | Out-Null
+
+          $pluginRoot = Join-Path $env:GITHUB_WORKSPACE "build\src\plugin"
+          $found = 0
+
+          Get-ChildItem -Path $pluginRoot -Directory -Filter "*_artefacts" | ForEach-Object {
+            $vst3Path = Join-Path $_.FullName "Release\VST3"
+            if (Test-Path $vst3Path) {
+              Get-ChildItem -Path $vst3Path -Directory -Filter "*.vst3" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination $pluginStage -Recurse -Force
+                $found++
+              }
+            }
+          }
+
+          if ($found -eq 0) {
+            throw "No VST3 bundles were found in the expected build output folders."
+          }
+
+          $appArtefacts = Join-Path $env:GITHUB_WORKSPACE "build\src\app\MnmLibraryApp_artefacts"
+          if (Test-Path $appArtefacts) {
+            Copy-Item -Path $appArtefacts -Destination (Join-Path $stage "LibraryApp") -Recurse -Force
+          } else {
+            Write-Warning "Library app artefacts folder was not found; the VST3 plugins will still be packaged."
+          }
+
+          @"
+          Monomodule Windows x64 build
+
+          VST3 plugins are in the VST3 folder. Copy the .vst3 folders to:
+          C:\Program Files\Common Files\VST3
+
+          The Library app build output, if present, is in the LibraryApp folder.
+          This build was compiled from the repository revision checked out by this workflow.
+          "@ | Set-Content -Path (Join-Path $stage "README.txt")
+
+          Compress-Archive -Path (Join-Path $stage "*") `
+            -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "Monomodule-Windows-x64.zip") `
+            -Force
+
+      - name: Upload compiled ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Monomodule-Windows-x64
+          path: Monomodule-Windows-x64.zip
+          if-no-files-found: error
